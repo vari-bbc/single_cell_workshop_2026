@@ -1,0 +1,632 @@
+---
+title: "Single-cell RNAseq Workshop"
+subtitle: "From FASTQ to unfiltered Seurat object"
+author: "Ian Beddows"
+institute: "Single-cell genomics workshop · Day 1"
+date: last-modified
+date-format: "MMMM D, YYYY"
+format:
+  revealjs:
+    scrollable: true
+    # output-file: index.html
+    theme: [black, custom.scss]
+    # logo: "./images/vaigs.png"
+    slide-number: c
+    menu: false
+    smaller: true
+    # highlight-style: dracula
+    # highlight-style: vim-dark
+    highlight-style: monokai
+    code-block-font-size: 0.8em
+    auto-stretch: false
+    code-line-numbers: false
+    embed-resources: true
+    self-contained: true
+    # css: custom.css
+execute:
+  echo: true
+  cache: true
+  eval: false
+# bibliography: [./references.bib, ../../resources/co_first_authors.bib]
+# csl: apa_full_title.csl
+---
+
+
+## You can find this presentation in  
+
+```bash
+/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day1/presentations/scRNAseq_day1_session3.html
+```
+
+## Considerations For Data Analysis {.shrink}
+
+:::: {.columns}
+::: {.column}
+::: {.incremental}
+- Technology
+- Read architecture
+- Single-nuclei
+  - count introns by default
+  - expect fewer UMIs per cell
+
+:::
+:::
+
+::: {.column}
+::: {.incremental}
+- Barcode whitelist and correction strategy
+- UMI collapsing
+- Spike-ins
+- Reference genome (build/version)
+- Gene annotation (source/version)
+
+:::
+:::
+::::
+
+
+![](figures/read_anatomy.svg){.fragment style="background-color: white;" width="95%"}
+
+
+
+## Gold-standard algorithms {.shrink}
+
+### RNA mapping (short-read single-cell)
+
+:::: {.columns}
+::: {.column}
+::: {.incremental}
+
+- Alignment
+  - [STARsolo](https://github.com/alexdobin/STAR/blob/master/docs/STARsolo.md)
+  - STAR algorithm + barcode correction and UMI collapsing
+  - Genome index, splice-aware
+  - Alex Dobin (Cold Spring Harbor)
+  
+:::
+:::
+::: {.column}
+::: {.incremental}
+
+- Pseudo-alignment
+  - [kb-python](https://github.com/pachterlab/kb_python)
+    - [kallisto](https://github.com/pachterlab/kallisto)
+      - 'Bag of k-mers'
+      - Fast but no BAM
+    - [bustools](https://github.com/BUStools/bustools) 
+      - Correct barcodes, collapse UMIs, gene count or tcc)
+  - Lior Pachter (Cal Tech)
+
+:::
+:::
+::::
+
+## Gold-standard algorithms {.shrink}
+
+### RNA mapping (short-read single-cell)
+
+:::: {.columns}
+::: {.column width="95%"}
+::: {.incremental}
+
+- Selective Alignment
+  - [simpleaf](https://github.com/COMBINE-lab/simpleaf)
+    - [salmon](https://salmon.readthedocs.io/en/latest/salmon.html) 
+      - Find exact transcriptome index matches, chain them to positions, then run a fast banded alignment (Smith-Watterman) for score
+    - [piscem](https://github.com/COMBINE-lab/piscem)
+      - Constraint chaining, rejection of reads whose k-mers are present but structurally inconsistent (direction, spacing); no banded alignment
+      - Returns a mapping position (used in UMI dedup) but no CIGAR
+    - [alevin-fry](https://github.com/COMBINE-lab/alevin-fry) 
+      - Turns salmon/piscem output to cell x gene matrix
+  - Rob Patro (Univ. of Maryland)
+  
+:::
+:::
+::: {.column}
+::: {.incremental}
+
+
+
+:::
+:::
+::::
+
+
+
+
+## Gold-standard algorithms {.shrink}
+
+### RNA mapping (long-read single-cell)
+
+::: {.incremental}
+- [minimap2](https://github.com/lh3/minimap2)
+  - Heng Li (Harvard)
+- [lr-kallisto](https://kallisto.readthedocs.io/en/latest/lr/pseudoalignment.html)
+
+:::
+
+## Read annotation {.shrink}
+
+:::: {.columns}
+::: {.column width="50%"}
+
+- [Neural Network for long-read annotation and demultiplexing](https://academic.oup.com/gpb/advance-article/doi/10.1093/gpbjnl/qzag055/8722302)
+  - developed for single-cell nanopore data
+  - CNN to classify read elements (UMIs, barcodes, mRNA, adapters, polyA)
+  - Can train custom read architectures
+  - [Semwal et al. 2026.](https://doi.org/10.1093/gpbjnl/qzag055)
+
+:::
+::: {.column width="50%"}
+
+![](figures/tranq_fig1two.png){width=65%}
+
+:::
+::::
+
+<!-- ## Post 'Alignment' QC -->
+
+<!-- - If you have a BAM, then [Picard RNAseq metrics](https://broadinstitute.github.io/picard/picard-metric-definitions.html#RnaSeqMetrics) -->
+<!--   - PCT_MRNA_BASES -->
+<!--   - PCT_RIBOSOMAL_BASES -->
+<!--     - judged on per sample basis not per cell -->
+
+<!-- ::: {.notes} -->
+
+<!-- ::: -->
+
+## Calling Cells
+
+:::: {.columns}
+::: {.column width="0%"}
+
+
+:::
+::: {.column width="100%"}
+
+After barcode correction, UMI collapsing
+![](figures/knee_plot.png){width=75%}
+
+What about neutrophils, resting lymphocytes, & red blood cells? 
+
+:::
+::::
+
+ 
+## Sparse Data
+
+![](figures/bulk_vs_sc.svg){width=95%}
+
+
+## Matrix Market Format
+
+:::: {.columns}
+::: {.column width="50%"}
+
+- [MatrixMarket](https://math.nist.gov/MatrixMarket/formats.html)
+  - Extension `.mtx` 
+  - Row, Column, Value
+  - dgCMatrix R class used by Seurat and SingleCellExperiment
+    - double, general, compressed
+  - Must be read in full
+- features.tsv.gz
+- barcodes.tsv.gz
+
+
+:::
+
+::: {.column width="50%"}
+
+![](figures/dense_view.png){height="30%"}
+
+--
+
+![](figures/mtx.png){height="30%"}
+
+:::
+::::
+ 
+## Matrix Market From 10x Cell Ranger
+
+Cellranger filtered features from zabrafish scRNAseq
+
+```bash
+[ian.beddows@compute002 filtered_feature_bc_matrix]$ ls
+barcodes.tsv.gz  features.tsv.gz  matrix.mtx.gz
+[ian.beddows@compute002 filtered_feature_bc_matrix]$ zcat matrix.mtx.gz |head -6
+%%MatrixMarket matrix coordinate integer general
+%metadata_json: {"software_version": "cellranger-9.0.1", "format_version": 2}
+32520 13176 21692115
+378 1 1
+813 1 1
+[ian.beddows@compute002 filtered_feature_bc_matrix]$ zcat features.tsv.gz |head -2
+ENSDARG00000103202	ENSDARG00000103202	Gene Expression
+ENSDARG00000009657	fgfr1op2	Gene Expression
+[ian.beddows@compute002 filtered_feature_bc_matrix]$ zcat barcodes.tsv.gz |head -2
+AAACCAAAGCCTTCGC-1
+AAACCAAAGCGCGATT-1
+
+```
+
+## Hierarchical Data Format
+
+- .h5, .hdf5
+- Works with datasets larger than your RAM
+- In R
+  - HDF5Array and DelayedArray packages
+  - Seurat and SingleCellExperiment read h5 directly
+- Python: h5py and [AnnData backed mode](https://deepwiki.com/scverse/anndata/4.2-backed-mod)
+
+
+## Analysis in Python
+
+- [scanpy](https://github.com/scverse/scanpy)
+ - Scales to larger datasets >1M cells
+ - faster
+- [AnnData objects](https://anndata.readthedocs.io/en/latest/index.html)
+- bioconda
+
+```python
+#!/usr/bin/env python3
+import scanpy as sc
+
+# From .mtx
+adata = sc.read_10x_mtx("outs/filtered_feature_bc_matrix/",
+                        var_names="gene_symbols", cache=True)
+# Or from .h5
+adata = sc.read_10x_h5("outs/filtered_feature_bc_matrix.h5")
+
+```
+
+# Analysis in R
+
+## Single-cell experiment (SCE) {.shrink}
+
+- Subclass that extends [SummarizedExperiment](https://bioconductor.org/packages/3.23/bioc/vignettes/SummarizedExperiment/inst/doc/SummarizedExperiment.html) S4 class
+  - SummarizedExperiment functions work with SCE 
+  - reducedDims, altExps
+  - [SCE documentation](https://bioconductor.org/books/3.13/OSCA.intro/the-singlecellexperiment-class.html)
+
+![](figures/SingleCellExperiment_organization.png){width="50%"}
+
+## SCE packages
+
+  - `DropletUtils` Utilities for droplet data.
+  - `scuttle` Computes per-cell QC metrics; basic normalization & log-transformation.
+  - `scater` Plots QC and expression; runs PCA, t-SNE, and UMAP.
+  - `scran` Size-factor normalization, highly variable gene selection, and marker detection.
+  - `bluster` graph-based, k-means, and hierarchical clustering.
+  - `batchelor` Corrects batch effects and integrates datasets; fastMNN.
+  - `scDblFinder` Detects doublets.
+  - `BiocSingular` Runs fast approximate PCA/SVD on large datasets.
+  - `BiocNeighbors` Performs fast nearest-neighbor searches for graph building and UMAP.
+  - `edgeR` Differential expression
+
+<!-- ## SCE data import -->
+
+<!-- ```{r } -->
+
+<!-- # DropletUtils: Imports 10x data and calls empty droplets with emptyDrops. -->
+<!-- library(DropletUtils) -->
+
+<!-- # use filtered not raw features -->
+<!-- sce <- DropletUtils::read10xCounts("outs/filtered_feature_bc_matrix/") -->
+<!-- # read10xCounts also accepts the .h5 file -->
+
+<!-- ``` -->
+
+## Seurat Package
+
+[Seurat vignettes](https://satijalab.org/seurat/articles/get_started_v5_new)
+
+### Install
+
+```{r}
+if (!requireNamespace("Seurat", quietly = TRUE)) {
+  BiocManager::install("Seurat")
+}
+library(Seurat)
+```
+
+### Seurat Object Class
+
+- S4 container for single-cell data (`SeuratObject` package)
+- Holds raw counts, normalized data, metadata, and analysis results together
+- Created from a count matrix
+
+
+## Seurat Object Class Main Slots
+
+| Slot          | Contents                                         |
+|---------------|--------------------------------------------------|
+| `assays`      | Expression data (e.g. `RNA`)       |
+| `meta.data`   | Per-cell annotations (nCount, nFeature, clusters) |
+| `reductions`  | PCA, UMAP, t-SNE embeddings                      |
+| `graphs`      | SNN / KNN graphs used for clustering             |
+| `active.ident`| Current cell identities (clusters)               |
+| `commands`    | Log of Seurat functions run                      |
+
+
+## Accessing Seurat Data {.shrink}
+
+```{r}
+dim(seu)                  # genes x cells
+head(seu@meta.data)       # cell metadata
+seu$percent.mt <- PercentageFeatureSet(seu, pattern = "^MT-") # get MT pct
+
+Idents(seu)               # active identities
+Embeddings(seu, "umap")   # Get Cell Embeddings 
+
+colnames(seu) # Cell names
+Cells(seu)
+
+Features(seu) # Feature names
+rownames(seu)
+
+# List of object layers
+Layers(seu) # e.g. "counts"
+
+# working with multimodal objects list assays
+Assays(seu) # e.g. "RNA"
+
+# Assay-specific features
+Features(seu[["RNA"]])
+
+```
+
+## Convert Between Seurat & SingleCellExperiment
+
+```{r}
+
+# Seurat -> SCE
+sce <- Seurat::as.SingleCellExperiment(seu)
+
+# SCE -> Seurat
+seu <- SeuratObject::as.Seurat(sce, counts = "counts", data = "logcounts")
+# as.Seurat imported with Seurat
+
+```
+
+## AnnotationDbi
+
+- [AnnotationDbi](https://bioconductor.org/packages/3.23/bioc/vignettes/AnnotationDbi/inst/doc/IntroToAnnotationPackages.pdf)
+  - Organism and TxDb 
+  - org.Hs.eg.db and TxDb.Hsapiens.UCSC.hg38.knownGene
+  
+```{r}
+# map sce ENS genes to symbol
+library(org.Hs.eg.db)
+ens <- rownames(sce)
+rowData(sce)$symbol  <- mapIds(org.Hs.eg.db,
+                               keys      = ens,
+                               column    = "SYMBOL",
+                               keytype   = "ENSEMBL",
+                               multiVals = "first")
+```
+
+## Molecular Signatures
+  
+- [Molecular Signatures DataBase](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp) 
+  - 9 major collections
+- [msigdbr](https://github.com/igordot/msigdbr) R package
+  - provides Molecular Signatures Database (MSigDB) gene sets
+- ssGSEA to assign pathway score to all cells
+ 
+## Batch Correction
+
+- [scvi-tools](https://docs.scvi-tools.org/en/stable/user_guide/index.html)
+  - Python
+- [Harmony](https://portals.broadinstitute.org/harmony/articles/quickstart.html)
+  - Returns corrected PC embeddings
+  - Iterative soft k-means clustering
+- [batchelor](https://bioconductor.posit.co/packages/release/bioc/vignettes/batchelor/inst/doc/correction.html)
+  - Returns corrected PC embeddings & counts
+  - fastMNN
+
+## Cell Cycle Estimation {.shrink}
+
+:::: {.columns}
+::: {.column width="40%"}
+
+- [Seurat regression](https://satijalab.org/seurat/articles/cell_cycle_vignette)
+  - markers to estimate cell cycle then regress this out
+- [Tricycle](https://github.com/hansenlab/tricycle) 
+  - estimates cell-cycle embedding using a fixed reference dataset 
+- [cyclone](https://rdrr.io/bioc/scran/man/cyclone.html)
+  - scran package
+- Be skeptical of 'velocity' estimates
+  
+:::
+::: {.column width="60%"}
+
+![](figures/heatmap_cell_cycle_genes.svg){width="95%"}
+
+:::
+::::
+
+
+## Cell Annotation
+### Tools
+- [singleR](https://bioconductor.org/packages/3.23/bioc/vignettes/SingleR/inst/doc/SingleR.html)
+  - transfers labels from a reference dataset without clustering
+- [Pan-Human Azimuth](https://azimuth.hubmapconsortium.org/)
+  - [Seurat AzimuthAPI](https://satijalab.org/pan_human_azimuth/r/azimuthapi)
+  - 23 human tissues and 380 cell types
+- [scGate](https://github.com/carmonalab/scGate)
+  - in-silico flow cytometry using defined markers
+- [scType](https://sctype.app/) 
+  – fast marker-based annotation
+- [Seurat reference mapping vignette](https://satijalab.org/seurat/articles/integration_mapping) 
+  – `FindTransferAnchors` / `MapQuery` workflow
+
+
+## Cell Annotation
+### Reference atlases & data portals
+- [CELLxGENE](https://cellxgene.cziscience.com/)
+- [Human Cell Atlas Data Portal](https://data.humancellatlas.org/) 
+- [HuBMAP Data Portal](https://portal.hubmapconsortium.org/) - Azimuth source
+- [Tabula Sapiens](https://tabula-sapiens-portal.ds.czbiohub.org/) & [Tabula Muris](https://biohub.org/tabula-muris/)
+- [Allen Brain Cell Atlas](https://brain-map.org/bkp/explore/abc-atlas)
+- [Broad Single Cell Portal](https://singlecell.broadinstitute.org/single_cell)
+- [UCSC Cell Browser](https://cells.ucsc.edu/)
+- [EBI Single Cell Expression Atlas](https://www.ebi.ac.uk/gxa/sc/home)
+- [DISCO](https://www.immunesinglecell.org/)
+- [Zebrafish](https://daniocell.nichd.nih.gov/)
+
+### Marker gene databases
+- [CellMarker 2.0](http://bio-bigdata.hrbmu.edu.cn/CellMarker/)
+- [Cell Ontology (CL)](https://obofoundry.org/ontology/cl.html)
+
+
+## Cell Annotation Example Mouse
+
+<!-- ::::{.columns} -->
+<!-- :::{.column width="50%"} -->
+- [A Single-Cell Tumor Immune Atlas for Precision Oncology.](https://doi.org/10.1101/2020.10.26.354829)
+- Cell types from [Tabula Muris](https://biohub.org/tabula-muris/) in R
+
+<!-- ::: -->
+<!-- :::{.cloumn width="70%"} -->
+![](figures/tabMuris.png){width=75%}
+
+<!-- ::: -->
+<!-- :::: -->
+
+
+## Cell Annotation Example Zebrafish
+
+<!-- ::::{.columns} -->
+<!-- :::{.column width="50%"} -->
+- 10x Chromium data
+- Daniocell + SingleR
+
+<!-- ::: -->
+<!-- :::{.cloumn width="70%"} -->
+![](figures/UMAP_2fish_labels_16hpf edited.svg){style="background-color: white;" width="75%"}
+
+<!-- ::: -->
+<!-- :::: -->
+
+
+ 
+# Hands-on Session
+
+## Plan
+
+- Load MatrixMarket data into a Seurat Object
+- Include metadata in Seurat mata.data slot
+- Explore object
+
+## Load Rstudio
+
+- [Ondemand RStudio](https://ondemand2.vai.zone/pun/sys/dashboard/batch_connect/sys/sh_rstudio/session_contexts/new)
+  - Select R Version: **bbc2/R/alt/R-4.6.0-setR_LIBS_USER**
+    - R-4.6.0-setR_LIBS_USER has R packages pre-installed
+  - Create an R project *or* use `setwd()` to change current working directory.
+    - default: `/home/firstname.lastname/`
+    - better: `/varidata/researchtemp/hpctmp/first.lastname/`
+    - better: `/varidata/research/projects/your_lab/your_space`
+
+## Gastrulation Dataset
+
+[Mouse Gastrulation Data](https://www.nature.com/articles/s41586-019-0933-9)
+
+- Mouse E8.5 blastocyst injected with ESCs
+  - ESCs either td-tomato+ or ctrl
+- Control experiment to show that injected ESCs develop into all lineages
+
+
+```{r, eval=TRUE}
+
+baseDir = '/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day1/data/'
+sample_meta <- read.csv(file.path(baseDir, "per_sample_meta.csv"), row.names = 1)
+sample_meta
+
+```
+
+## Seurat Read10X dgCMatrix
+
+```{r,eval=TRUE}
+
+library(Seurat)
+samples <- paste0("sample", 5:10)
+directories <- setNames(nm = samples, object = file.path(baseDir, samples))
+counts <- Read10X(directories)
+class(counts)
+head(colnames(counts))
+head(counts[,1:5])
+```
+
+## dgCMatrix to Seurat
+
+```{r,eval=TRUE}
+# read cell metadata
+cell_meta <- read.csv(file.path(baseDir, "per_cell_meta.csv"), row.names = 1)
+nrow(cell_meta)==ncol(counts)
+
+rownames(cell_meta) <- paste0('sample',cell_meta$sample, "_", cell_meta$barcode)
+
+table(colnames(counts)%in%rownames(cell_meta))
+table(rownames(cell_meta)%in%colnames(counts))
+
+cell_meta <- cell_meta[colnames(counts), colnames(cell_meta)]
+
+```
+
+## dgCMatrix to Seurat
+
+```{r,eval=TRUE}
+
+seu <- CreateSeuratObject(counts, meta.data = cell_meta, project = "workshop")
+seu
+
+# commented out, but this is raw_seu.Rds
+# saveRDS(seu,'/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day1/data/raw_seu.Rds')
+
+head(seu@meta.data)
+```
+
+## dgCMatrix to SingleCellExperiment
+
+```{r,eval=TRUE}
+
+library(SingleCellExperiment)
+sce <- SingleCellExperiment(list(counts = counts), colData = cell_meta)
+sce
+
+```
+
+## Seurat object structure
+
+```{r,eval=TRUE}
+str(seu, max.level = 2)
+```
+
+## Seurat object structure
+
+```{r,eval=TRUE}
+Seurat::GetAssayData(seu, layer = "counts")[1:5, 1:5]
+```
+
+## Tomorrow Morning
+
+- Continue with filtering cells and features in this dataset
+
+
+<!-- ## Workshop Dataset from library() -->
+
+
+
+<!-- ```{r eval=TRUE} -->
+<!-- # load as a SCE object -->
+<!-- library(MouseGastrulationData) -->
+<!-- sce.chimera <- WTChimeraData(samples=5:10) -->
+<!-- sce.chimera -->
+<!-- ``` -->
+
+<!-- ```{r eval=TRUE} -->
+<!-- # make Seurat object -->
+<!-- seu.chimera <- Seurat::as.Seurat(sce.chimera,counts = "counts", data = NULL) -->
+<!-- seu.chimera -->
+<!-- ``` -->
+

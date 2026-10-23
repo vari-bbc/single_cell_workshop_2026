@@ -1,0 +1,447 @@
+---
+title: "Single-cell RNAseq Workshop"
+subtitle: "QC and Filtering with Seurat"
+author: "Robert Fillinger"
+institute: "Single-cell genomics workshop · Day 2"
+date: last-modified
+date-format: "MMMM D, YYYY"
+format:
+  revealjs:
+    scrollable: true
+    output-file: scRNA_workshop_day2_session1.html
+    theme: [dracula]
+    # logo: "./images/vaigs.png"
+    slide-number: c
+    menu: false
+    smaller: true
+    # highlight-style: dracula
+    # highlight-style: vim-dark
+    highlight-style: monokai
+    code-block-font-size: 0.8em
+    auto-stretch: false
+    code-line-numbers: false
+    embed-resources: true
+    self-contained: true
+    # css: custom.css
+    code-overflow: wrap
+execute:
+  echo: true
+  cache: true
+  eval: true
+# bibliography: [./references.bib, ../../resources/co_first_authors.bib]
+# csl: apa_full_title.csl
+---
+
+## Last time
+
+- HPC introduction
+- How single cell data is acquired
+- Got acquainted with single-cell data
+
+## We'll continue where we left off
+
+- Open https://ondemand3.vai.zone/pun/sys/dashboard and choose the RStudio app.
+- Choose RStudio version 2026-01-31-392.
+- From the R version dropdown, choose bbc2/R/alt/R-4.6.0-setR_LIBS_USER (this is important!).
+- Set the run time as needed (e.g., 4 hours).
+- Set #CPU: 8 and Memory: 64, then click Launch. 
+- When your job is ready, click Connect to RStudio Server. You are now in RStudio.
+
+- In RStudio, go to the Terminal tab and type:
+
+`mkdir /varidata/researchtemp/hpctmp/first.lastname/`
+
+- Replace “first.lastname” with your own name, with no spaces.
+
+`/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day2/presentations`
+
+## This time: Quality Control and Filtration
+
+- Number of unique genes in samples
+- Cell counts per sample
+- Ribosomal read counts
+- Mitochondrial read counts
+- Doublet cells
+
+
+  
+
+## Libraries and single-cell data
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- Load in the libraries (or install them) 
+
+- Read in our data from day 1 with the readRDS function 
+
+:::
+
+::: {.column width=60%}
+
+```{r}
+
+# BiocManager::install(c("Seurat","SeuratWrappers", "scDblFinder") )
+
+library(Seurat)
+library(SeuratWrappers)
+library(scDblFinder)
+
+seu = readRDS("/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day1/data/raw_seu.Rds")
+
+```
+
+:::
+
+::::
+
+## Number of cells
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- Cell quality and quantity are important.
+
+- The first step is to make sure there are enough cells in each sample.
+
+:::
+
+::: {.column width=60%}
+
+```{r}
+
+barplot(table(seu@meta.data$orig.ident), ylab = "Number of cells") # Number of cells for each sample
+
+```
+:::
+::::
+
+
+
+## Number of cells
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+
+- Sample 6 looks pretty low compared to other cells. 
+- *Ideally*, you want >2000 cells, but lower cell counts can still work.
+
+:::
+
+::: {.column width=60%}
+
+```{r}
+
+barplot(table(seu@meta.data$orig.ident), ylab = "Number of cells") # Number of cells for each sample
+
+```
+:::
+
+::::
+
+## Looking at the number of features
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- Feature count gives an idea of how many unique genes a sample's cells have transcribed. 
+
+- This is **not** the number of reads.
+
+- Samples 5 and 6 have a lot of features! They're different, but that might make sense for your experiment.
+
+:::
+
+::: {.column width=60%}
+
+```{r Filtering Cells for Feature Count}
+
+VlnPlot(seu, features = "nFeature_RNA") # Number of unique transcribed RNA features 
+
+```
+
+:::
+
+::::
+
+## Number of RNA reads in a cell
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+This *is* the number of reads in a cell. 
+
+:::
+
+::: {.column width=60%}
+```{r}
+
+VlnPlot(seu, features = "nCount_RNA") # Number of reads in each cell
+
+```
+:::
+
+::::
+
+
+## Finding cell ribosomal reads
+
+:::: {.columns style="align-items: center;"}
+
+::: {.columns width=40%}
+
+- High ribosomal reads can indicate cell damage
+- scRNA libraries often don't pick up rRNA
+
+:::
+
+::: {.columns width=60%}
+
+```{r Filtering Cells for Ribosomal Read Content}
+
+head(rownames(seu)[grepl("^Rp[sl]", rownames(seu))], n = 40)
+
+seu <- PercentageFeatureSet(seu, pattern = "^Rp[sl]", col.name = "percent_ribo")
+
+```
+:::
+
+::::
+
+
+## Looking at ribosomal content of cells
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+VlnPlot(seu, features = "percent_ribo")
+
+```
+::::
+
+
+## Combining read and feature count
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- Each dot is an individual cell, colored by sample
+
+- "0.91" is the Pearson correlation relating RNA counts to features
+
+:::
+
+::: {.column width=60%}
+```{r}
+
+FeatureScatter(seu, feature1 = "nCount_RNA", feature2 = "nFeature_RNA",
+               group.by = "sample")
+
+```
+:::
+
+::::
+
+
+## Mitochondrial reads
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- Mitochondrial genes' names start with "mt-"
+- Cells with lots of mitochondrial genes are likely damaged and should be removed
+
+:::
+
+::: {.column width=60%}
+ 
+```{r Finding Cells for Mitochondrial Reads}
+
+rownames(seu)[grepl("^mt-", rownames(seu))]
+
+seu <- PercentageFeatureSet(seu, pattern = "^mt-", col.name = "percent_mito")
+
+```
+
+:::
+
+::::
+
+
+## Combined look at mitochondrial reads
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+FeatureScatter(seu, feature1 = "nFeature_RNA", feature2 = "percent_mito", 
+               group.by = "sample")
+
+```
+
+::::
+
+## Filtering to keep quality cells
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40%}
+
+- We'll use miQC, a tool packaged with Seurat 
+- Uses `percent_mito` feature we built
+- Also uses `nFeature_RNA`
+
+:::
+
+::: {.column width=60%}
+
+```{r Filtering cells}
+
+head(seu@meta.data, n = 3)
+
+seu <- RunMiQC(seu,
+          percent.mt = "percent_mito",
+          nFeature_RNA = "nFeature_RNA",
+          posterior.cutoff = 0.95,      # The probability a cell is part of a compromised distribution. Below the appointed cutoff will be marked to keep.
+          model.slot = "flexmix_model" )
+
+table(seu@meta.data$miQC.keep)
+
+```
+:::
+::::
+
+## See what changes with your data
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+seu <- subset(seu, subset = (miQC.keep == "keep"))
+
+table(seu@meta.data$miQC.keep)
+
+```
+
+
+::::
+
+## Doublets
+
+:::: {.columns style="align-items: center;"}
+
+::: {.column width="40%"}
+- Unwanted pairs of cells that are analyzed as one 
+- Don't cluster with other cells
+- Might appear as an intermediate cell type
+- Inflate the cell count
+- Introduce noise
+:::
+
+::: {.column width="60%"}
+![](singlets_doublets.png){width=70% fig-align="center"}
+:::
+
+::::
+
+
+## Filtering cells for doublets
+:::: {.columns style="align-items: center;"}
+
+::: {.column width=40% }
+
+- Doublets can be difficult to detect, but we have tools to find them. 
+
+- We'll use one called `scDblFinder`, which doesn't work with Seurat objects. 
+
+- It works with `SingleCellExperiment` objects. 
+
+- Let's convert our Seurat object to a SCE object. 
+
+:::
+
+::: {.column width=60% fig-align="center"}
+```{r}
+
+seu = JoinLayers(seu)
+
+seu = as.SingleCellExperiment(seu)
+
+```
+:::
+
+::::
+
+## Find the doublet filtration
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+seu = scDblFinder(seu)
+
+```
+
+::::
+
+
+## Converting back to Seurat
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+seu <- as.Seurat(seu, counts = "counts", data = NULL)
+
+table(seu@meta.data$scDblFinder.class)
+
+```
+
+::::
+
+
+## Remove cells marked as doublets
+
+:::: {.columns style="align-items: center;"}
+
+```{r}
+
+seu <- subset(seu, subset = (scDblFinder.class == "singlet"))
+
+table(seu@meta.data$scDblFinder.class)
+
+```
+
+::::
+
+## Save your work!!
+
+:::: {.columns style="align-items: center;"}
+
+```{r, eval=FALSE}
+
+saveRDS(seu, "/varidata/researchtemp/hpctmp/*your_folder*/scRNA_workshop_2026.rds")
+
+```
+
+::::
+
+## Wrapping up
+
+:::: {.columns style="align-items: center;"}
+
+- Different features of single-cell reads
+- "Does the QC make sense?"
+- PercentFeatureSet and other Seurat functions to look at features
+- Converting between Seurat and SingleCellExperiment objects
+
+::::
+

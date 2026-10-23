@@ -1,0 +1,518 @@
+---
+title: "Single-cell RNAseq Workshop"
+subtitle: "Differential expression and experimental design"
+author:
+  - name: Daniel Bautista
+    affiliation: "Single-cell genomics workshop · Day 3 Session 2"
+date: "October 22, 2026"
+format:
+  revealjs:
+    theme: dark                # same look as Day 3 Session 1 (check against Daisy's YAML)
+    smaller: true
+    slide-number: c/t
+    highlight-style: monokai
+    code-copy: true
+    embed-resources: true
+    footer: "Single cell RNA-seq Workshop - Day 3 session 2"
+execute:
+  eval: false                  # code is shown, not run; figures come from day3_session2_make_figures.R
+  echo: true
+---
+
+
+## Recap and today's goals
+
+- Day 1: Single cell basics, Seurat object
+- Day 2: QC, normalization, integration, dimensional reduction, and clustering
+- Day 3 Session 1: marker genes, manual and reference-based (SingleR) annotation
+- Today at session 2:
+  1. Differential expression (DE)
+  2. Experimental design
+  3. Trajectories, cell communication, spatial, ...
+
+::: callout-note
+Session 1 compared **clusters** (markers). Today we compare **conditions** within a cell type: will the difference hold in new animals?
+:::
+
+
+## Bulk vs single-cell differential expression
+
+|                    | Bulk RNA-seq                         | scRNA-seq                                                         |
+|--------------------|--------------------------------------|-------------------------------------------------------------------|
+| One library        | one sample                           | thousands of cells from one sample                                |
+| Conditions         | defined by the design                | defined by the design (here: FACS sorting)                         |
+| Cell types         | mixed together in each sample        | **defined from the expression data** (clustering + annotation)     |
+| A "DE gene" can be | expression **or** composition change | separated: expression (DE) vs proportion (DA)                     |
+| DE tools           | DESeq2 / edgeR / limma               | the same tools, on **pseudobulk**                                 |
+
+## Which values do we test? Raw counts
+
+```{r}
+Layers(seu[["RNA"]])
+#> "counts"  "data"  "scale.data"
+```
+
+| Layer | What it holds | Use  |
+|-------|---------------|----------------|
+| `counts` | raw UMI counts | pseudobulk sums these |
+| `data` | log-normalized per cell | `FindMarkers` default |
+| `scale.data` | z-scores HVGs | PCA and heatmaps |
+| integrated / corrected | values adjusted to remove sample differences | for clustering and UMAP |
+
+- DESeq2, edgeR need counts
+
+# The experiment
+
+## Chimeric embryos (Pijuan-Sala et al. 2019)
+
+- td-Tomato+ **wild-type** ESCs injected into **wild-type** blastocysts → chimeric embryos at E8.5
+- 6–7 embryos pooled and dissociated, then FACS-sorted:
+  - **tomato+** → "injected" cells (samples 5, 7, 9)
+  - **tomato−** → "host" cells (samples 6, 8, 10)
+- Repeated for **3 independent pools** (3, 4, 5)
+
+. . .
+
+::: {.callout-note title="What do we expect?"}
+Both populations are wild-type. If injection doesn't disturb development, we expect **few differences** within each cell type.
+:::
+
+## The design: paired by pool
+
+![](plots/design_cells_per_sample.png){fig-align="center" height="420"}
+
+- Each pool gives **one host + one injected** sample, processed together → **paired design**
+- The replicate is the **pool**: n = 3 per condition
+
+## Load the object
+
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(edgeR)                  # bulk RNA-seq DE, used on the pseudobulk
+
+seu <- readRDS("/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day2/data/day2_session2_seu.rds")
+
+DefaultAssay(seu) <- "RNA"      # DE uses the RNA assay, never the integrated values
+seu <- JoinLayers(seu)          # Day 2 split the layers by sample; join them again
+
+# remove cells the published annotation flags as doublets or "stripped" nuclei
+seu <- subset(seu, subset = !celltype.mapped %in% c("Doublet", "Stripped"))
+```
+
+
+::: callout-tip
+Restart R before this session
+:::
+
+## Define the condition
+
+```{r}
+# tomato = TRUE  -> cell comes from the injected td-Tomato+ stem cells
+# tomato = FALSE -> cell comes from the host embryo
+seu$injection <- ifelse(seu$tomato, "injected", "host")
+seu$injection <- factor(seu$injection, levels = c("host", "injected"))   # host = reference
+
+# seu[[]] is the cell metadata table
+seu[[]] |> distinct(sample, pool, injection) |> arrange(pool)
+
+table(seu$sample)                # cells per sample
+#>    5    6    7    8    9   10
+#> 1918  567 2589 2851 3880 6279
+```
+
+- **host** is the reference level, so fold changes read "injected vs host"
+
+## Host and injected cells share the same map
+
+![](plots/umap_injection.png){fig-align="center" height="480"}
+```{r}
+DimPlot(seu, reduction = "umap", group.by = "injection",
+             shuffle = TRUE,                   
+             cols = c("grey55", "#d6604d"), pt.size = 0.2) 
+```
+
+# Comparing conditions
+
+## Three different questions
+
+| Question | Analysis | Replicate unit | Tool |
+|----------|----------|----------------|------|
+| What distinguishes cluster X? | **Markers** (Session 1) | cells | `FindAllMarkers` |
+| Does cell type X change between conditions? | **Differential expression** | **samples** | pseudobulk + edgeR |
+| Does the proportion of X change? | **Differential abundance** | **samples** | cell counts + edgeR |
+
+## Cell types come from the data: what does that mean for DE?
+
+- Cell types were **defined from expression**
+- It uses **the same expression values** we later test
+
+. . .
+
+| Comparison | Groups defined by |
+|---|---|---|
+| Cluster A vs cluster B (markers) | the expression data |
+| Injected vs host **within** a cell type | the design (FACS sorting) |
+
+## Where are the Mesenchyme cells?
+
+![](plots/mesenchyme_location.png){fig-align="center" height="440"}
+
+- `celltype.mapped` was assigned **cell by cell** 
+
+## Two ways to compare conditions
+
+1. **Per cell**: `FindMarkers`, treating each cell as an independent observation
+2. **Pseudobulk**: sum the cells of each sample, then compare **samples**
+
+## Per cell: `FindMarkers`
+
+```{r}
+mes <- subset(seu, subset = celltype.mapped == "Mesenchyme")
+table(mes$sample)                     # Mesenchyme cells per sample
+#>   5   6   7   8   9  10
+#> 218  28 208 123 439 281
+
+# the same function as in Session 1, now comparing conditions
+Idents(mes) <- "injection"
+sc_de <- FindMarkers(mes, ident.1 = "injected", ident.2 = "host",
+                     logfc.threshold = 0,   # test all genes, no fold-change cut-off
+                     min.pct = 0.1)         # detected in at least 10 % of cells in one group
+sum(sc_de$p_val_adj < 0.05)           # how many significant genes?
+#> [1] 403
+```
+
+- **403** significant genes, in a comparison where we expected few
+
+## A control comparison: host vs host
+
+```{r}
+# keep only two HOST samples: no condition difference between them
+host_only <- subset(mes, subset = injection == "host" & sample %in% c(6, 8))
+
+Idents(host_only) <- "sample"         # compare sample 6 vs sample 8
+fake_de <- FindMarkers(host_only, ident.1 = "6", ident.2 = "8",
+                       logfc.threshold = 0, min.pct = 0.1)
+sum(fake_de$p_val_adj < 0.05)
+#> [1] 125
+```
+
+
+- These are differences between samples (embryo pool, dissociation, capture), which a per-cell test can't separate from a condition effect
+
+# Pseudobulk differential expression
+
+## Aggregate the counts per sample and cell type
+
+```{r}
+# Sum the RAW counts of all cells that share a cell type AND a sample.
+# pool and injection are fixed within a sample: listing them adds no groups,
+# it just keeps them as metadata columns.
+pseudo <- AggregateExpression(seu,
+                              assays = "RNA",
+                              return.seurat = TRUE,
+                              group.by = c("celltype.mapped", "sample", "pool", "injection"))
+pseudo$injection <- factor(pseudo$injection, levels = c("host", "injected"))
+head(pseudo[[]])                    # one row per pseudobulk sample
+
+# how many cells were summed into each pseudobulk sample?
+n_cells <- table(seu$celltype.mapped, seu$sample)                 # cell type x sample
+pseudo$ncells <- as.vector(n_cells[cbind(pseudo$celltype.mapped,  # row = cell type
+                                         pseudo$sample)])         # column = sample
+
+# drop pseudobulk samples built from fewer than 10 cells (too noisy)
+pseudo <- subset(pseudo, subset = ncells >= 10)
+
+mes_pseudo <- subset(pseudo, subset = celltype.mapped == "Mesenchyme")
+```
+
+
+## Filter and normalize
+
+```{r}
+# DGEList = edgeR's container: counts + a table describing the samples
+y <- DGEList(counts  = as.matrix(LayerData(mes_pseudo, assay = "RNA", layer = "counts")),
+             samples = mes_pseudo[[]])
+
+# keep genes with enough counts to be tested
+keep <- filterByExpr(y, group = y$samples$injection)
+summary(keep)
+#>    Mode   FALSE    TRUE
+#> logical   19511    9942
+y <- y[keep, , keep.lib.sizes = FALSE]
+
+y <- normLibSizes(y)          # TMM normalization, as in bulk RNA-seq
+plotMDS(y)                       # how similar are the samples?
+```
+
+- The per-cell normalization from Day 2 is **not** used: edgeR normalizes the pseudobulk itself
+
+## Look at the samples first: MDS
+
+![](plots/mds_mesenchyme.png){fig-align="center" height="480"}
+
+## The model: block on pool, test injection
+
+```{r}
+# expression ~ pool + injection: compare injected vs host WITHIN each pool
+design <- model.matrix(~ factor(pool) + injection, data = y$samples)
+colnames(design)
+#> "(Intercept)" "factor(pool)4" "factor(pool)5" "injectioninjected"
+
+y   <- estimateDisp(y, design)                     # variation between replicates
+fit <- glmQLFit(y, design, robust = TRUE)          # fit the model for every gene
+res <- glmQLFTest(fit, coef = "injectioninjected") # test the injection effect
+
+summary(decideTests(res))                          # DEGs at FDR 5 %
+#>        injectioninjected
+#> Down                   5
+#> NotSig              9930
+#> Up                     7
+topTags(res)                                       # top 10 genes
+```
+
+- **12 DEGs**, compared with 403 from the per-cell test
+
+## Variation between replicates (BCV)
+
+![](plots/bcv_mesenchyme.png){fig-align="center" height="460"}
+
+## What does "BCV = 0.12" mean?
+
+- **Coefficient of variation (CV)** = standard deviation ÷ mean: variation as a percentage of the average
+- **BCV** = whether a fold change is “bigger than normal variation between replicates”.
+- **BCV = 0.12** → a typical gene differs by about **±11 %** between our pools
+
+. . .
+
+- A per-cell test ignores this variation entirely; pseudobulk measures it and uses it
+
+## Top genes in Mesenchyme
+
+| gene | logFC | logCPM | FDR |
+|------|------:|-------:|----:|
+| Cdkn1c | −6.88 | 7.6 | 4.6e-09 |
+| Xist | −7.56 | 6.4 | 1.1e-06 |
+| Erdr1 | 2.05 | 7.9 | 2.0e-05 |
+| **tomato-td** | **7.38** | 4.4 | 4.8e-05 |
+| Mid1 | 1.48 | 6.0 | 1.5e-03 |
+| H13 | −1.12 | 6.7 | 2.0e-03 |
+| Zdbf2 | 1.64 | 6.0 | 2.7e-03 |
+| Kcnq1ot1 | 1.31 | 6.3 | 8.7e-03 |
+| Akr1e1 | −1.65 | 4.2 | 9.0e-03 |
+| Nnat | 0.84 | 9.8 | 1.0e-02 |
+
+## Closer look
+
+![](plots/paired_mesenchyme.png){fig-align="center" height="420"}
+
+## DE comparison
+
+![](plots/deg_counts_comparison.png){fig-align="center" height="420"}
+
+- Per-cell tests find many more genes
+
+
+
+
+# All cell types
+
+## The same steps for every cell type
+
+```{r}
+# the Mesenchyme steps, wrapped in a function. pb = pseudobulk of ONE cell type
+run_edger <- function(pb) {
+  if (min(table(pb$injection)) < 2) return(NULL)        # need >= 2 samples per condition
+  y <- DGEList(counts  = as.matrix(LayerData(pb, assay = "RNA", layer = "counts")),
+               samples = pb[[]])
+  design <- model.matrix(~ factor(pool) + injection, data = y$samples)
+  if (nrow(design) <= ncol(design)) return(NULL)        # need more samples than model terms
+  y <- y[filterByExpr(y, group = y$samples$injection), , keep.lib.sizes = FALSE]
+  y <- normLibSizes(y)
+  y <- estimateDisp(y, design)
+  res <- glmQLFTest(glmQLFit(y, design, robust = TRUE), coef = "injectioninjected")
+  tab <- topTags(res, n = Inf)$table
+  tab$gene <- rownames(tab)
+  tab
+}
+
+de_list <- list()
+for (ct in unique(pseudo$celltype.mapped)) {
+  res_ct <- run_edger(subset(pseudo, subset = celltype.mapped == ct))
+  if (!is.null(res_ct)) de_list[[ct]] <- res_ct          # keep only testable cell types
+}
+de_all <- bind_rows(de_list, .id = "celltype")           # one long table, all genes
+```
+
+
+- 22 cell types could be tested
+- Untested ≠ unchanged
+
+## How many DEGs per cell type?
+
+![](plots/degs_per_celltype.png){fig-align="center" height="500"}
+
+## Genes that change everywhere
+
+![](plots/recurring_genes.png){fig-align="center" height="440"}
+
+- **tomato-td**: positive control (sorting marker)
+- **Xist down**: the ESC line is **male**; host embryos are male and female
+- **Imprinted genes** (Kcnq1ot1 up; Cdkn1c, Phlda2 down; ...): imprinting drift in the cultured ESC line
+
+## Differential abundance: do proportions change?
+
+```{r}
+# count cells per cell type (rows) and sample (columns)
+abundances <- unclass(table(seu$celltype.mapped, seu$sample))
+
+# one row per sample, in the same order as the columns
+sample_info <- seu[[]] |> distinct(sample, pool, injection) |> arrange(sample)
+sample_info <- sample_info[match(colnames(abundances), sample_info$sample), ]
+
+# the same edgeR model, on cell numbers instead of gene counts
+y.ab <- DGEList(abundances, samples = sample_info)
+y.ab <- y.ab[filterByExpr(y.ab, group = y.ab$samples$injection), ]
+design.ab <- model.matrix(~ factor(pool) + injection, y.ab$samples)
+y.ab   <- estimateDisp(y.ab, design.ab, trend = "none")
+fit.ab <- glmQLFit(y.ab, design.ab, robust = TRUE, abundance.trend = FALSE)
+topTags(glmQLFTest(fit.ab, coef = "injectioninjected"))
+```
+
+## Differential abundance
+
+![](plots/da_proportions.png){fig-align="center" height="400"}
+
+- **ExE ectoderm** is nearly absent from injected cells: ESCs don't contribute to extra-embryonic tissue (a positive control)
+- Proportions are linked: when one cell type goes down, all others go up a little (**composition effect**)
+
+## GSEA
+
+```{r}
+library(fgsea)
+library(msigdbr)
+
+# mouse Hallmark gene sets (older msigdbr versions: category = "H")
+hallmark <- msigdbr(species = "Mus musculus", collection = "H")
+pathways <- split(hallmark$gene_symbol, hallmark$gs_name)   # pathway -> genes
+
+# rank ALL tested genes: + higher in injected, - lower in injected
+mes_table <- topTags(res, n = Inf)$table
+ranks <- sign(mes_table$logFC) * -log10(mes_table$PValue)
+names(ranks) <- rownames(mes_table)
+ranks <- sort(ranks, decreasing = TRUE)
+
+gsea_res <- fgsea(pathways = pathways, stats = ranks, minSize = 15, maxSize = 500)
+head(gsea_res[order(gsea_res$pval), ])
+```
+
+## GSEA result
+
+![](plots/gsea_mesenchyme.png){fig-align="center" height="440"}
+
+## Pitfalls checklist
+
+- Use pseudobulk for condition comparisons
+- Use **Raw counts**, after `JoinLayers()`
+- Drop pseudobulk samples with too few cells
+- Put pairing/batch **in the design**
+- Check **sex genes** (Xist, Ddx3y, Eif2s3y, Kdm5d, Uty) and **ambient RNA**
+- Labels come from the data: check **DA** alongside DE
+- Seurat `avg_log2FC` ≠ edgeR `logFC`
+
+## Save the results
+
+```{r}
+if (!dir.exists("res")) {
+  dir.create("res")
+}
+
+# all genes, all tested cell types
+write.csv(de_all, "res/DE_injected_vs_host_pseudobulk_edgeR.csv", row.names = FALSE)
+
+# how many cells went into each pseudobulk sample
+write.csv(pseudo[[]], "res/pseudobulk_ncells.csv", row.names = FALSE)
+
+# package versions
+writeLines(capture.output(sessionInfo()), "res/sessionInfo.txt")
+```
+
+
+# Experimental design tips
+
+## What counts as a replicate
+
+1. **1,000 cells from 1 animal is n = 1**: cells are measurements *within* a replicate
+2. More cells per sample still help: **more precise mean estimates → more power**
+3. Technical replicates (one sample over two lanes) add no biological *n*
+4. Pooling animals averages them, but each pool is **one** replicate (our chimera pools)
+
+
+
+## Depends on the model
+
+:::: columns
+::: {.column width="55%"}
+![](plots/power_cv2_mouse_vs_human.png)
+:::
+::: {.column width="45%"}
+| μ = 20 → | Mouse | Human |
+|---|---|---|
+| baseline CV² | 0.060 | 0.210 |
+| 2× cells or depth | **−42 %** | −12 % |
+| 10× counts | −75 % | −21 % |
+| 2× replicates | −50 % | −50 % |
+
+Mouse BCV ≈ 0.1; human ≈ 0.4 (edgeR guide). **This dataset: 0.12.**
+:::
+::::
+
+## Summary
+
+- **More biological replicates always add power**
+- **Mice have much smaller BCVs than humans** → fewer animals can be enough
+- **Depth can partly compensate for replicates**, more so the smaller the BCV
+- For a fixed budget, **many cells sequenced shallowly** usually beat few cells sequenced deeply (scPower, Schmid et al. 2021)
+- **More detected genes → slightly lower power**: the same UMIs spread over more genes means lower counts per gene
+  - Day 2: samples 5 and 6 had many features per cell
+
+## Rare cell types
+
+```
+cells needed per sample  ≈  target cells of that type per sample  ÷  its frequency
+
+1 %   type, 20 cells per sample  →   2,000 cells per sample
+0.1 % type, 20 cells per sample  →  20,000 cells per sample
+```
+
+- Few cells per pseudobulk get drops while filtering
+- Rare types need more samples, more cells and higher depth
+- Enrichment before capture (FACS, as with td-Tomato here; depletion of abundant types)
+
+
+
+## More analysis using the `seu` object
+
+| Question | Approach | R / Bioconductor | Python (scverse) |
+|---|---|---|---|
+| Do proportions change, without fixed clusters? | Differential abundance on neighbourhoods | miloR, sccomp, propeller | Milo, scCODA (pertpy) |
+| Order cells along a process | Trajectory / pseudotime | Slingshot, Monocle 3, tradeSeq | PAGA, CellRank |
+| Where are cells heading? | RNA velocity | velociraptor | scVelo |
+| Which cells talk to each other? | Cell–cell communication | CellChat, NicheNet | LIANA+, CellPhoneDB |
+
+## Regulation, multiple modalities, perturbations
+
+| Question | Approach | R / Bioconductor | Python (scverse) |
+|---|---|---|---|
+| Which transcription factors drive the programs? | Gene regulatory networks, TF activity | SCENIC, decoupleR | pySCENIC, decoupler |
+| Protein + RNA in the same cell | CITE-seq | Seurat WNN | totalVI, muon |
+| Chromatin + RNA in the same cell | Multiome (ATAC + RNA) | Signac, ArchR | MultiVI, muon |
+| What does each gene do? | Perturbation screens (Perturb-seq) | Seurat mixscape | pertpy |
+
+## Spatial transcriptomics
+
+| Type | Examples | Resolution | Genes |
+|---|---|---|---|
+| Sequencing-based | Visium, **Visium HD**, Slide-seq, Stereo-seq | spots → near single-cell  | whole transcriptome |
+| Imaging-based | **Xenium**, **MERFISH**, **CosMx** | single-cell / subcellular | panels of hundreds–thousands |
