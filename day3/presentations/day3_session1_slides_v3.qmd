@@ -1,0 +1,504 @@
+---
+title: "Single-cell RNAseq Workshop"
+subtitle: "Marker genes and cell type annotation"
+author: "Daisy Fu"
+institute: "Single-cell genomics workshop · Day 3 Session 1"
+date: last-modified
+date-format: "MMMM D, YYYY"
+format:
+  revealjs:
+    theme: [black, custom.scss]
+    slide-number: c/t
+    footer: "Single cell RNA-seq Workshop - Day 3 session 1"
+    controls: true
+    controls-tutorial: true
+    controls-back-arrows: visible
+    menu: false
+    smaller: true
+    highlight-style: monokai
+    code-block-font-size: 0.8em
+    auto-stretch: false
+    code-line-numbers: false
+    embed-resources: true
+execute:
+  echo: true
+  cache: true
+  eval: false
+---
+
+# Where we are
+
+## Recap and today's goals
+
+- Day 1: Single cell basics, unfiltered Seurat object
+- Day 2: QC, normalization, integration, dimensional reduction, and clustering at 3 resolutions
+- Today at session 1, two questions:
+  1. **What genes define each cluster?** Marker gene identification
+  2. **What cell type is each cluster?** Manual and reference-based annotation
+
+::: {.callout-note}
+Clusters are a computational result. Cell types are a biological interpretation. How do we link the two? 
+:::
+
+::: {.notes}
+5 min. Start from the Day 2 UMAP and ask: "We have clusters. What are they?"
+:::
+
+## Plan for this session (60 min)
+
+| Part | Topic 
+|---|---|
+| 1 | Load the Day 2 object, pick a resolution |
+| 2 | `FindMarkers` and `FindAllMarkers` |
+| 3 | Marker gene visualization: Ridge, violin, feature plots, and a heatmap |
+| 4 | Manual annotation |
+| 5 | Reference-based annotation with SingleR |
+| 6 | Wrap-up and discussion |
+
+## The data
+
+- Mouse gastrulation chimera data at E8.5
+  - [Pijuan-Sala et al. 2019, *Nature*](https://www.nature.com/articles/s41586-019-0933-9)
+  - R package for the data: `MouseGastrulationData`
+- Published labels in the `celltype.mapped` column
+  - obtained by mapping the cells onto the gastrulation atlas
+  - we use them as a benchmark
+
+# Load the data
+
+## Load the Day 2 object
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(SingleCellExperiment)
+library(SingleR)
+library(pheatmap)
+library(mclust)      # adjustedRandIndex
+library(patchwork)   # combine with ggplots 
+
+seu <- readRDS("/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day2/data/day2_session2_seu.rds")
+
+```
+
+## UMAP for resolution 0.3
+
+![](figures/p_umap_res_0.3.png){fig-align="center" height=520px}
+
+
+## Three resolutions from Day 2
+
+```{r}
+
+table(seu$RNA_snn_res.0.3)
+table(seu$RNA_snn_res.0.5)
+
+# 0.5 mostly subdivides 0.3
+table(seu$RNA_snn_res.0.3, seu$RNA_snn_res.0.5)
+
+DimPlot(seu, reduction = "umap", group.by = "RNA_snn_res.0.3", label = TRUE, repel = TRUE)
+```
+
+- `seurat_clusters` only holds the result of the **last** `FindClusters` call
+- Set it explicitly so everyone works with the same clusters
+
+## Pick one resolution
+
+```{r}
+res_col <- "RNA_snn_res.0.3"
+
+seu$seurat_clusters <- seu@meta.data[[res_col]]
+Idents(seu) <- "seurat_clusters"
+
+table(Idents(seu))   # 22 clusters
+```
+
+::: {.incremental}
+- 0.5 mostly splits 0.3 clusters
+- We will be using 0.3 clusters, and you can practice 0.5 on your own. 
+:::
+
+## Use the RNA assay
+
+Marker tests use the **normalized RNA data**, not integrated or batch-corrected values.
+
+```{r}
+
+DefaultAssay(seu) <- "RNA"
+
+seu                      # layers are split by batch
+seu <- JoinLayers(seu)   # Seurat v5
+seu                      # fewer layers now
+```
+
+# Finding marker genes
+
+## What makes a good marker?
+
+::: {.incremental}
+- **Specific**: high in the cluster, low everywhere else
+- **Detected**: expressed in a good fraction of the cluster's cells
+- **Useful**: interpretable, ideally a gene with known biology
+:::
+
+::: {.notes}
+Two ways to look: one cluster against the rest (FindMarkers), or every cluster at once (FindAllMarkers).
+:::
+
+## `FindMarkers`: one cluster against all other cells
+
+```{r}
+# cluster 1 vs all other cells when ident.2 is not specified
+cluster1.markers <- FindMarkers(seu, ident.1 = 1)
+
+cluster1.markers$gene <- rownames(cluster1.markers)
+head(cluster1.markers, n = 15)
+```
+
+## How to read the table
+
+:::: {.columns}
+::: {.column width="45%"}
+
+- `avg_log2FC`: positive when higher in the cluster, negative when higher in the rest
+- `pct.1` and `pct.2`: fraction of cells expressing the gene in each group
+  - a good marker is high in `pct.1` and low in `pct.2`
+- `p_val_adj`: **over-optimistic**
+  - the clusters were defined from the same data we now test
+  - use it to rank genes, not as a literal significance level
+
+:::
+::: {.column width="55%"}
+
+![](figures/marker_gene_table.png){height=350px}
+
+:::
+::::
+  
+  
+## Positive and negative markers
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Positive**: higher in the cluster
+
+```{r}
+positive.markers <- cluster1.markers %>%
+  filter(avg_log2FC > 0) %>%
+  arrange(desc(avg_log2FC))
+head(positive.markers, 10)
+```
+
+:::
+::: {.column width="50%"}
+
+**Negative**: higher in all other cells
+
+```{r}
+negative.markers <- cluster1.markers %>%
+  filter(avg_log2FC < 0) %>%
+  arrange(avg_log2FC)
+head(negative.markers, 10)
+```
+
+:::
+::::
+
+
+## `FindAllMarkers`: positive markers for every cluster
+
+```{r}
+all.markers <- FindAllMarkers(seu,
+                              only.pos = TRUE,
+                              min.pct = 0.05,
+                              logfc.threshold = 0.25, # pct expressed in either of the two populations
+                              return.thresh = 0.05,   # p-value threshold
+                              verbose = TRUE)
+
+# fraction of cells expressing the gene: inside minus outside the cluster
+all.markers <- all.markers |>
+  mutate(pct_difference = pct.1 - pct.2)
+```
+
+::: {.notes}
+This is slow on shared nodes. Show the call, then load the pre-computed object:
+all.markers <- readRDS("cache/all_markers.rds")
+:::
+
+## Top markers per cluster
+
+```{r}
+top5 <- all.markers %>%
+  filter(p_val_adj < 0.05) %>%
+  group_by(cluster) %>%
+  slice_max(pct_difference, n = 5, with_ties = FALSE)
+
+top10 <- all.markers %>%
+  filter(p_val_adj < 0.05) %>%
+  group_by(cluster) %>%
+  slice_max(pct_difference, n = 10, with_ties = FALSE)
+
+print(top5, n = 20)
+```
+
+- We rank by `pct_difference`: how much more often the gene is detected inside the cluster than outside
+
+## Save the tables
+
+```{r}
+dir.create("res", showWarnings = FALSE)
+
+write.csv(cluster1.markers, "res/cluster1_markers.csv", quote = FALSE, row.names = FALSE)
+write.csv(all.markers,      "res/all_markers.csv",      quote = FALSE, row.names = FALSE)
+write.csv(top5,             "res/top5_markers.csv",     quote = FALSE, row.names = FALSE)
+write.csv(top10,            "res/top10_markers.csv",    quote = FALSE, row.names = FALSE)
+```
+
+# Visualizing markers
+
+## Pick two genes from cluster 1
+
+```{r}
+genes <- top5$gene[top5$cluster == 1][1:2]
+genes
+```
+
+## Ridge, violin, and feature plots
+
+```{r}
+# ridge plot (needs the ggridges package)
+RidgePlot(seu, features = genes, ncol = 2)
+
+# violin plot
+VlnPlot(seu, features = genes, pt.size = 0, ncol = 2)
+
+# feature plot on the UMAP (the default reduction)
+FeaturePlot(seu, features = genes, reduction = "umap", ncol = 2)
+```
+
+
+## What does each plot show that the others don't?
+
+- Ridge and violin plots show the **distribution per cluster**
+  - is expression bimodal or unimodal?
+- The feature plot shows **where on the embedding** the gene is
+  - does it mark one region or several?
+
+## A heatmap on a reduced number of cells
+
+```{r}
+seu_small <- subset(seu, downsample = 100)    # up to 100 cells per cluster
+feats <- unique(top5$gene)                    # use top10$gene for more genes
+seu_small <- ScaleData(seu_small, features = feats)   # DoHeatmap needs scaled data
+
+DoHeatmap(seu_small, features = feats,
+          size = 4) +                                 # cluster labels on top
+  theme(axis.text.y = element_text(size = 5.5)) +     # gene names
+  guides(colour = "none")                             # hide group legend, keep color bar
+```
+
+## Reading the heatmap
+
+- Colors are **z-scores**: each gene is centered on its own average
+  - magenta: below the gene's average
+  - black: near the average
+  - yellow: above the average
+- Colors are relative within a gene
+  - brightness cannot be compared between genes
+- Downsampling stops large clusters from dominating the plot
+
+
+## Heatmap of the top markers
+
+![](figures/p_heatmap.png){fig-align="center" height=520px}
+
+
+# Manual annotation
+
+## Where to find marker genes
+
+- **Marker databases**
+  - [CellMarker 3.0](http://bio-bigdata.hrbmu.edu.cn/CellMarker): curated markers, human and mouse
+  - [PanglaoDB](https://panglaodb.se): community-curated markers, human and mouse
+- **Atlases and reference data**: CELLxGENE, Allen Brain Cell Atlas
+- **Annotation tools**: Azimuth, SingleR, scGate
+- **Cell Ontology**: standard names for cell types
+- **Literature**: the atlas paper and primary papers for your cell types
+- Compare several sources, and confirm with the literature when they disagree 
+
+::: {.notes}
+Most databases are organized by tissue and weighted toward adult cells, so coverage of embryonic cell types may be thin. For this dataset the atlas paper is the best source. Check that the links open before the session.
+:::
+
+## Check known marker genes
+
+```{r}
+known_markers <- list(
+  Epiblast_PS   = c("Pou5f1", "T", "Mesp1"),
+  Neural        = c("Sox2", "Sox1", "Otx2", "Six3"),
+  Surface_ecto  = c("Krt8", "Krt18", "Tfap2a"),
+  Neural_crest  = c("Sox10", "Foxd3"),
+  Paraxial_mes  = c("Tbx6", "Meox1", "Pax3"),
+  Lateral_mes   = c("Hand1", "Hand2", "Tbx4"),
+  Cardiac       = c("Myl7", "Tnnt2", "Nkx2-5"),
+  Endothelium   = c("Pecam1", "Cdh5", "Kdr", "Tal1"),
+  Blood         = c("Gata1", "Hba-x", "Runx1"),
+  Endoderm_gut  = c("Foxa2", "Sox17", "Cdx2"),
+  Notochord     = c("Noto", "Shh"),
+  ExE_endoderm  = c("Ttr", "Apoa1")
+)
+
+# drop markers that are not in the data
+known_markers <- lapply(known_markers, intersect, rownames(seu))
+```
+
+::: {.notes}
+These are broad lineage markers. They tell you the lineage, not the subtype.
+:::
+
+## DotPlot of the known markers
+
+```{r}
+names(known_markers) <- gsub("_", "\n", names(known_markers))   # "Endoderm_gut" -> "Endoderm\ngut"
+
+DotPlot(seu, features = known_markers) + RotatedAxis() +
+  theme(axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 7),
+        strip.text  = element_text(size = 7),
+        legend.text  = element_text(size = 7),
+        legend.title = element_text(size = 7),
+        legend.key.size = unit(0.3, "cm"))
+```
+
+- Dot size: fraction of cells expressing the gene. Color: average expression
+- These are **broad lineage** markers: they suggest a lineage, but will not separate close subtypes
+
+## Dot plot for known marker genes
+
+![](figures/known_genes_dotplot.png){fig-align="center" height=520px}
+
+## Compare clusters with the published labels
+
+```{r}
+# Rows = our clusters, columns = published cell types, scaled within each cluster
+tab  <- table(Cluster = seu$seurat_clusters, Published = seu$celltype.mapped)
+prop <- prop.table(tab, margin = 1)
+pheatmap(prop, cluster_rows = FALSE, cluster_cols = FALSE, fontsize = 8)
+```
+
+- `table()` counts cells for each cluster and label
+- `prop.table(margin = 1)` divides each row by its total, so a row sums to 1
+
+## Reading the cluster vs label heatmap
+
+- A **clean row** (one bright tile): the cluster maps to one label
+- A **row with several bright tiles**: a mixed cluster
+  - often closely related labels, such as blood progenitors and erythroid cells
+- A **label spread over several rows**: a cell type split across clusters
+
+## The most common label per cluster
+
+```{r}
+data.frame(
+  cluster = rownames(prop),
+  majority_published = colnames(prop)[apply(prop, 1, which.max)],
+  fraction = round(apply(prop, 1, max), 2)
+)
+```
+
+- `apply(prop, 1, which.max)`: for each row, the position of the largest value
+- `fraction`: how much of the cluster carries that label
+
+# Reference-based annotation
+
+## SingleR
+
+::: {.incremental}
+- Labels **each cell independently**, without using the clusters
+  1. finds marker genes for each cell type in the reference
+  2. correlates every query cell with each cell type in the reference using those marker genes
+  3. picks the best-scoring type
+- Cells without a clear winner are flagged as low confidence (`NA` in `pruned.labels`)
+- It can only assign labels that exist in the reference
+:::
+
+## Load the reference and run SingleR
+
+```{r}
+ref <- readRDS("/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day3/data/ref_EmbryoAtlas_200cells.rds")
+
+dim(ref)
+table(ref$celltype)
+
+query_data <- GetAssayData(seu, assay = "RNA", layer = "data")   # log-normalized
+
+pred <- SingleR(test = query_data,  # test is expression matrix like project
+                ref = ref,
+                labels = ref$celltype,
+                de.method = "wilcox",
+                aggr.ref = T)
+
+seu$SingleR        <- pred$labels
+seu$SingleR_pruned <- pred$pruned.labels      # NA = low-confidence call
+
+sum(is.na(seu$SingleR_pruned)) ## see how many cells got NA. 
+```
+
+## How well do the labels agree?
+
+```{r}
+# fraction of cells with exactly the same label
+mean(seu$SingleR == seu$celltype.mapped, na.rm = TRUE)
+
+# Any difference in cell types between published data and cell types in the reference? 
+setdiff(unique(seu$celltype.mapped), unique(seu$SingleR))
+
+```
+
+## Agreement is not validation
+
+::: {.callout-warning}
+`celltype.mapped` was itself obtained by mapping onto the atlas, and SingleR uses the atlas as a reference, so the two annotations are **not independent**.
+:::
+
+- Agreement shows that SingleR reproduces the published mapping, not that either label is correct
+- A small reference (200 cells) can lower agreement, so treat the numbers as a demonstration
+- Marker genes (the DotPlot) are the independent check
+- Disagreement can be informative: it may highlight cells transitioning between cell states or types, or cells that are poorly represented in the reference
+
+## Clusters vs labels as a proportion heatmap
+
+```{r}
+source("/varidata/researchtemp/hpctmp/single_cell_workshop_2026/day3/scripts/make_annotation_heatmap.R")   # helper function, see the appendix
+
+res1 <- make_annotation_heatmap(seu, annotation_col = "celltype.mapped",
+                                title = "Clusters vs published labels",
+                                exclude = c("Doublet", "Stripped"))
+
+res2 <- make_annotation_heatmap(seu, annotation_col = "SingleR",
+                                title = "Clusters vs SingleR")
+
+res1$plot + res2$plot
+```
+
+- Each tile is the fraction of a cluster's cells carrying a label
+- Annotations are ordered so clean clusters form a diagonal
+
+# Wrap-up
+
+## Discussion
+
+- Which clusters mapped cleanly to one label, and which were mixed?
+- Where did the published and SingleR labels disagree?
+- Why is a cluster with two related labels not necessarily a failure?
+
+## Take-home
+
+::: {.incremental}
+- Markers rank genes for a cluster: use `pct.1`, `pct.2`, and `avg_log2FC` together
+- Visualize with several plots: each shows something different
+- Annotate with markers first, then check with a reference
+- Compare cluster-level and cell-level labels, and treat disagreement as information
+:::
+
